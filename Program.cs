@@ -1,34 +1,43 @@
-﻿using TmdbTeleBot;
+﻿using System.Text.Json;
 using Telegram.Bot;
 using Telegram.Bot.Polling;
 using Telegram.Bot.Types;
 using Telegram.Bot.Types.Enums;
+using TmdbTeleBot;
+using TmdbTeleBot.Config;
+using TmdbTeleBot.Handlers;
 
-var botClient = new TelegramBotClient("7902299486:AAEZ6y9SB0KKhqUpeLLWID2-sRI2Gk8iOf0");
-
+var settings = LoadSettings();
+var botClient = new TelegramBotClient(settings.Telegram.Token);
 var cts = new CancellationTokenSource();
 
-botClient.StartReceiving(
-    HandleUpdate,
-    HandleError,
-    new ReceiverOptions { AllowedUpdates = Array.Empty<UpdateType>() },
-    cancellationToken: cts.Token
-);
-
-await botClient.SendMessage(
-    chatId: 952857686,
-    text: "✅ Бот запущено та готовий до роботи",
-    cancellationToken: cts.Token
-);
-
-Console.WriteLine("Bot is running...");
+await StartBot(botClient, settings, cts.Token);
 Console.ReadLine();
+
+AppSettings LoadSettings()
+{
+    var configJson = File.ReadAllText("appsettings.json");
+    return JsonSerializer.Deserialize<AppSettings>(configJson) ?? throw new Exception("❌ Не вдалося завантажити конфігурацію.");
+}
+
+async Task StartBot(TelegramBotClient client, AppSettings appSettings, CancellationToken cancellationToken)
+{
+    await client.DeleteWebhook(cancellationToken: cancellationToken);
+
+    client.StartReceiving(HandleUpdate, HandleError, new ReceiverOptions { AllowedUpdates = [] }, cancellationToken: cancellationToken);
+
+    await client.SendMessage(chatId: appSettings.Telegram.AdminChatId, text: "✅ Бот запущено та готовий до роботи", cancellationToken: cancellationToken);
+
+    Console.WriteLine("Bot is running...");
+}
 
 async Task HandleUpdate(ITelegramBotClient bot, Update update, CancellationToken cancellationToken)
 {
+    var apiUrl = settings.Backend.ApiUrl;
+
     if (update.Type == UpdateType.CallbackQuery)
     {
-        await Handlers.HandleCallbackQuery(bot, update, cancellationToken);
+        await CallbackHandlers.HandleCallbackQuery(bot, update, apiUrl, cancellationToken);
         return;
     }
 
@@ -36,29 +45,36 @@ async Task HandleUpdate(ITelegramBotClient bot, Update update, CancellationToken
     {
         var chatId = update.Message.Chat.Id;
 
-        switch (messageText)
+        if (await HandleCommand(bot, messageText, chatId, apiUrl, cancellationToken))
+            return;
+
+        if (SearchState.Is(chatId))
         {
-            case "/start":
-                await Handlers.HandleStart(bot, chatId, cancellationToken);
-                break;
-            case "/menu":
-                await Handlers.ShowMenu(bot, chatId, cancellationToken);
-                break;
-            case "/random":
-                await Handlers.HandleRandom(bot, chatId, cancellationToken);
-                break;
-            case "/search":
-                SearchState.Set(chatId);
-                await Handlers.HandleSearchCommand(bot, update, cancellationToken);
-                break;
-            default:
-                if (SearchState.Is(chatId))
-                {
-                    SearchState.Clear(chatId);
-                    await Handlers.HandleTextInput(bot, update, cancellationToken);
-                }
-                break;
+            SearchState.Clear(chatId);
+            await CommandHandlers.HandleTextInput(bot, chatId, messageText, apiUrl, cancellationToken);
         }
+    }
+}
+
+static async Task<bool> HandleCommand(ITelegramBotClient bot, string messageText, long chatId, string apiUrl, CancellationToken cancellationToken)
+{
+    switch (messageText)
+    {
+        case "/start":
+            await CommandHandlers.HandleStart(bot, chatId, apiUrl, cancellationToken);
+            return true;
+
+        case "/random":
+            await CommandHandlers.HandleRandom(bot, chatId, apiUrl, cancellationToken);
+            return true;
+
+        case "/search":
+            SearchState.Set(chatId);
+            await CommandHandlers.HandleSearchCommand(bot, chatId, apiUrl, cancellationToken: cancellationToken);
+            return true;
+
+        default:
+            return false;
     }
 }
 
